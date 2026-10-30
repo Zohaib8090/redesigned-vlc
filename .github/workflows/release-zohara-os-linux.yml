@@ -1,0 +1,165 @@
+name: release-zohara-os-linux
+
+on:
+  push:
+    tags: ['zohara-v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, such as 1.2.3 or 1.2.3-beta'
+        type: string
+        required: true
+      prerelease:
+        description: 'Mark this release as a pre-release'
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-zohara-os-linux-${{ github.ref }}-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Validate Zohara release
+    if: github.repository == 'Zohaib8090/redesigned-vlc'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      app-version: ${{ steps.check.outputs.app-version }}
+      package-suffix: ${{ steps.check.outputs.package-suffix }}
+      tag: ${{ steps.check.outputs.tag }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate repository, source and version
+        id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if [ "$GITHUB_REPOSITORY" != "Zohaib8090/redesigned-vlc" ]; then
+            echo "::error::This release workflow is restricted to Zohaib8090/redesigned-vlc"
+            exit 1
+          fi
+
+          if [ "$EVENT" = push ]; then
+            case "$REF_NAME" in
+              zohara-v*) VERSION="${REF_NAME#zohara-v}" ;;
+              *) echo "::error::release tags must use zohara-vX.Y.Z"; exit 1 ;;
+            esac
+            git fetch -q origin redesign
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/redesign; then
+              echo "::error::$REF_NAME is not on the redesign branch"
+              exit 1
+            fi
+            case "$VERSION" in *-*) PRERELEASE=true ;; *) PRERELEASE=false ;; esac
+          else
+            if [ "$REF" != "refs/heads/redesign" ]; then
+              echo "::error::manual releases must be started from the redesign branch"
+              exit 1
+            fi
+            VERSION="$INPUT_VERSION"
+            PRERELEASE="$INPUT_PRERELEASE"
+            TAG="zohara-v$VERSION"
+            if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null 2>&1; then
+              echo "::error::tag $TAG already exists; start the workflow from that tag instead"
+              exit 1
+            fi
+          fi
+
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "::error::invalid version '$VERSION'; use X.Y.Z or X.Y.Z-label"
+            exit 1
+          fi
+
+          TAG="zohara-v$VERSION"
+          APP_VERSION="${VERSION%%-*}"
+          PACKAGE_SUFFIX=""
+          case "$VERSION" in *-*) PACKAGE_SUFFIX="-${VERSION#*-}" ;; esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "app-version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "package-suffix=$PACKAGE_SUFFIX" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG from $GITHUB_SHA"
+
+  build:
+    needs: guard
+    uses: ./.github/workflows/build-linux.yml
+    permissions:
+      contents: write
+    with:
+      brand-version: ${{ needs.guard.outputs.app-version }}
+      package-suffix: ${{ needs.guard.outputs.package-suffix }}
+
+  release:
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+      TAG: ${{ needs.guard.outputs.tag }}
+      PRERELEASE: ${{ needs.guard.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cone-linux-appimage-x86_64
+          path: out
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cone-linux-x86_64
+          path: out
+
+      - name: Checksums and release notes
+        run: |
+          cd out
+          chmod +x ./*.AppImage
+          sha256sum ./*.AppImage ./*.tar.xz | sed 's| \./| |' > SHA256SUMS.txt
+          GLIBC=$(tar -xJOf ./*.tar.xz --wildcards '*/README-LINUX.txt' | grep -o 'glibc [0-9.]*' | head -n 1)
+          {
+            echo "Zohara OS $VERSION Linux release"
+            echo
+            echo "This release contains the Cone Player media-player build from the Zohara OS fork. It is not a bootable operating-system image."
+            echo
+            echo "- **AppImage**: make it executable with \`chmod +x\` and run it."
+            echo "- **Portable tarball**: unpack it and start \`./cone\`."
+            echo "- Requires 64-bit x86 Linux with glibc ${GLIBC:-2.39} or newer; current Arch Linux is supported. X11 or Wayland is required."
+            echo "- The application is Cone Player, based on the VLC 4 development branch."
+            echo
+            echo "SHA-256 checksums:"
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "Built from $GITHUB_SHA by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          ARGS=(--draft --title "Zohara OS $VERSION for Linux (Cone Player)" --notes-file out/notes.md)
+          if [ "$EVENT" = push ]; then
+            ARGS+=(--verify-tag)
+          else
+            ARGS+=(--target "$GITHUB_SHA")
+          fi
+          if [ "$PRERELEASE" = true ]; then
+            ARGS+=(--prerelease)
+          fi
+          gh release create "$TAG" out/*.AppImage out/*.tar.xz out/SHA256SUMS.txt "${ARGS[@]}"
+          echo "Draft release: $(gh release view "$TAG" --json url --jq .url)" | tee -a "$GITHUB_STEP_SUMMARY"

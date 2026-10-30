@@ -28,6 +28,10 @@ on:
   # sets the version, as a vX.Y.Z tag does for Windows
   workflow_call:
     inputs:
+      brand-version:
+        description: 'Application version without a prerelease suffix'
+        type: string
+        default: ''
       package-suffix:
         type: string
         default: ''
@@ -143,9 +147,10 @@ jobs:
       - name: Version
         id: version
         env:
+          BRAND_VERSION_INPUT: ${{ inputs.brand-version }}
           PACKAGE_SUFFIX_INPUT: ${{ inputs.package-suffix }}
         run: |
-          BRAND_VERSION=""
+          BRAND_VERSION="$BRAND_VERSION_INPUT"
           BRAND_PACKAGE_SUFFIX="$PACKAGE_SUFFIX_INPUT"
           case "$GITHUB_REF" in refs/tags/linux-v*) BRAND_VERSION="${GITHUB_REF_NAME#linux-v}" ;; esac
           if echo "$BRAND_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9.]+$'; then
@@ -153,7 +158,7 @@ jobs:
             BRAND_VERSION="${BRAND_VERSION%%-*}"
           fi
           if [ -n "$BRAND_VERSION" ] && ! echo "$BRAND_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::warning::tag $GITHUB_REF_NAME is not linux-vX.Y.Z: the build uses the default version"
+            echo "::warning::brand version is invalid: the build uses the default version"
             BRAND_VERSION=""
           fi
           if [ -n "$BRAND_PACKAGE_SUFFIX" ] && ! echo "$BRAND_PACKAGE_SUFFIX" | grep -Eq '^-[A-Za-z0-9.]+$'; then
